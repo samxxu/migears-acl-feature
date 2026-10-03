@@ -169,6 +169,10 @@ The boundary is a segment on both sides of a wildcard: `/api/posts/*` does **not
 always a whole segment — `/post*` is not a pattern. A placeholder names a position, not a value: it says
 *any* value may sit there, never *which* one — gating on a particular id belongs to `migears/acl-data`.
 
+Matching ignores case, the way the router does — a segment is matched against a lowercased file name, so
+`/USERS/42` and `/users/42` are one route and a rule written `/users/*` covers both. Only case is ignored:
+`/user/42` is a different path, and `-` and `_` are not interchangeable.
+
 Covering one segment has two spellings: `*` away from the end, and `{name}` anywhere. A `*` in the last
 position is instead the subtree form, and that is the one place the two part ways — `'/posts/{post_id}'` is
 a single post, `'/posts/*'` is the collection and everything under it. So an endpoint whose path carries an
@@ -235,9 +239,9 @@ for an array, for tests and for a composition root that assembles the config its
 no file name, because there is no file.
 
 `assert()` is the only call that throws on a denial. `denies()` is the negation of `allows()`;
-`forRequest()` is an alias of it, reading as what `MiRest::before()` is doing. `withUser()` returns a
-copy bound to one subject, leaving the instance it came from untouched — useful in a loop over users,
-and safe because nothing is shared.
+`forRequest()` is an alias of it, reading as what a resource's `before()` hook is doing — the per-resource
+hook, not a global one. `withUser()` returns a copy bound to one subject, leaving the instance it came
+from untouched — useful in a loop over users, and safe because nothing is shared.
 
 Roles accept a single string or a list, and the union of a list is taken.
 
@@ -452,6 +456,10 @@ if ($acl->allows('POST', '/api/posts', $roles, $userId)) {
 不覆盖 `/api/posts/42/commentary`。通配符永远是完整的一段——`/post*` 不是合法写法。占位符指名的是位置，
 不是值：它表达「这个位置上可以是任意值」，而非「是哪一个值」——按具体 id 放行属于 `migears/acl-data`。
 
+匹配不区分大小写，口径与路由一致——段是与「转小写后的文件名」比对的，所以 `/USERS/42` 与 `/users/42` 是
+同一条路由，写成 `/users/*` 的规则对两者都生效。被忽略的只有大小写：`/user/42` 是另一条路径，`-` 与 `_`
+也不可互换。
+
 覆盖一段有两种写法：不在末尾的 `*`，以及任意位置的 `{name}`。位于末尾的 `*` 则是子树形式，这也是两者唯一
 分道扬镳之处——`'/posts/{post_id}'` 是一篇文章，`'/posts/*'` 是该集合及其下所有内容。于是带 id 的端点可以
 照着它所守护的路由写：`'/posts/{post_id}/comments'` 到达某篇文章的评论，
@@ -510,7 +518,8 @@ public function withUser(int|string $userId): self
 组合根使用，它的消息不带文件名，因为没有文件。
 
 `assert()` 是唯一在拒绝时抛异常的调用。`denies()` 是 `allows()` 的取反；`forRequest()` 是它的别名，
-读起来正是 `MiRest::before()` 在做的事。`withUser()` 返回一个绑定到某主体的副本，原实例不受影响——
+读起来正是资源基类的 `before()` 钩子在做的事——是每个资源自己的那个钩子，不是全局钩子。
+`withUser()` 返回一个绑定到某主体的副本，原实例不受影响——
 在遍历用户时有用，也因为什么都不共享而安全。
 
 角色参数接受单个字符串或一个列表，列表按并集处理。

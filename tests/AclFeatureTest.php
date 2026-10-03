@@ -210,6 +210,38 @@ final class AclFeatureTest extends TestCase
         $this->assertTrue($acl->allows('Get', '/api/posts', ['viewer']));
     }
 
+    /**
+     * The router matches a segment against a lowercased file name, so `/Users/42`
+     * and `/users/42` are one route. The rule has to agree, or the same endpoint
+     * would be denied under one spelling and allowed under the other.
+     */
+    public function testThePathIsMatchedCaseInsensitively(): void
+    {
+        $acl = AclFeature::fromArray([
+            'roles' => ['viewer' => ['/users/*' => ['GET']]],
+        ]);
+
+        $this->assertTrue($acl->allows('GET', '/USERS/42', ['viewer']));
+        $this->assertTrue($acl->allows('GET', '/Users/42', ['viewer']));
+        $this->assertFalse($acl->allows('GET', '/OTHERS/42', ['viewer']));
+    }
+
+    /**
+     * Case is all that is ignored: the rest of the spelling still has to agree,
+     * because the router rewrites nothing else.
+     */
+    public function testOnlyCaseIsIgnoredInThePath(): void
+    {
+        $acl = AclFeature::fromArray([
+            'roles' => ['viewer' => ['/Users/{user_id}' => ['GET']]],
+        ]);
+
+        // a rule in any case reaches the same route
+        $this->assertTrue($acl->allows('GET', '/users/42', ['viewer']));
+        // but a different spelling is a different path
+        $this->assertFalse($acl->allows('GET', '/user/42', ['viewer']));
+    }
+
     public function testPatternsCoveringTheSamePathAreUnioned(): void
     {
         // A trailing '*' adds reach rather than precision, so on '/api/posts'

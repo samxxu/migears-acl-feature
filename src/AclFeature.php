@@ -172,7 +172,8 @@ final class AclFeature
 
     /**
      * A semantic alias of allows() for the request-shaped call site: it reads
-     * as "decide for this request", which is what MiRest::before() is doing.
+     * as "decide for this request", which is what a resource's before() hook is
+     * doing.
      *
      * @param string|list<string> $roles
      */
@@ -487,6 +488,11 @@ final class AclFeature
      * `/api/postscript` is not. Every other position is anchored: a `*` or a
      * placeholder there covers one segment, and the rest of the path has to line
      * up with the remaining segments one for one.
+     *
+     * Case is ignored, because the router ignores it: a segment is matched
+     * against a lowercased file name, so `/Users/42` and `/users/42` are one
+     * route and have to be one rule. Only case is ignored — the rest of the
+     * spelling has to agree, since nothing else is rewritten.
      */
     private static function matchesPath(string $pattern, string $path): bool
     {
@@ -494,8 +500,8 @@ final class AclFeature
             return true;
         }
 
-        $patternSegments = explode('/', $pattern);
-        $pathSegments = explode('/', $path);
+        $patternSegments = explode('/', strtolower($pattern));
+        $pathSegments = explode('/', strtolower($path));
 
         // Only a trailing '*' is the subtree form. A trailing placeholder is not:
         // a placeholder names one value, so it never grows into a subtree.
