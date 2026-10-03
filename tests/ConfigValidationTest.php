@@ -87,11 +87,37 @@ final class ConfigValidationTest extends TestCase
         );
     }
 
-    public function testAPathPatternWithAMidStringWildcardIsRejected(): void
+    public function testAPathPatternWithAPartialSegmentWildcardIsRejected(): void
+    {
+        // `*` is a whole segment, never part of one
+        $this->assertRejects(
+            ['roles' => ['editor' => ['/api/post*' => ['GET']]]],
+            "Invalid path pattern '/api/post*' for role 'editor'"
+        );
+    }
+
+    public function testAnUnclosedPlaceholderIsRejected(): void
+    {
+        // a rule meant as a placeholder must never load as inert literal text
+        $this->assertRejects(
+            ['roles' => ['editor' => ['/api/posts/{post_id' => ['GET']]]],
+            "Invalid path pattern '/api/posts/{post_id' for role 'editor'"
+        );
+    }
+
+    public function testAnEmptyPlaceholderIsRejected(): void
     {
         $this->assertRejects(
-            ['roles' => ['editor' => ['/api/*/posts' => ['GET']]]],
-            "Invalid path pattern '/api/*/posts' for role 'editor'"
+            ['roles' => ['editor' => ['/api/posts/{}/comments' => ['GET']]]],
+            "Invalid path pattern '/api/posts/{}/comments' for role 'editor'"
+        );
+    }
+
+    public function testAPathPatternWithAnEmptySegmentIsRejected(): void
+    {
+        $this->assertRejects(
+            ['roles' => ['editor' => ['/api//posts' => ['GET']]]],
+            "Invalid path pattern '/api//posts' for role 'editor'"
         );
     }
 

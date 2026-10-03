@@ -30,8 +30,10 @@ permission names to invent, keep in step with the routes, and re-check on every 
   route table it guards. Adding an endpoint means adding a line, not inventing an identifier.
 - **Deny by default.** An unmatched request is denied. `'default' => true` flips that for a module that
   is mostly open, but the shipped posture is closed.
-- **A fixed evaluation order, not a precedence puzzle.** Role results union, then a user-level `deny`
-  wins outright, then a user-level `grant` adds. No rule is silently shadowed by another.
+- **The most specific rule wins; equally specific ones union.** Within a rule map only the patterns that
+  anchor the most of the path are consulted, so a precise rule is not widened by a loose one beside it,
+  and nothing depends on the order of keys in the file. Role results then union, a user-level `deny` wins
+  outright, and a user-level `grant` adds.
 - **All-or-nothing at load.** The whole file is validated before an instance exists, so one malformed
   entry loads nothing rather than half a permission set.
 - **Zero runtime dependencies, no I/O after load.** One file is read once; `allows()` is then a pure
@@ -111,11 +113,16 @@ $acl = AclFeature::fromFile(__DIR__ . '/config/acl-feature.php');
 ```
 
 ```php
-// MiRest base class — the recommended call site: the check finishes before the
-// request reaches a resource handler, so a denial never runs handler code
-protected function before(string $method, string $path, array $roles, int|string|null $userId): void
+// A base resource class — the recommended call site: the check runs before the
+// request reaches a handler, so a denial never runs handler code. The path is
+// the request path as the router saw it, and the rule is written with a
+// single-segment wildcard for whichever positions carry an id.
+protected function before(Request $request): ?Response
 {
-    $this->aclFeature->assert($method, $path, $roles, $userId);
+    // $roles and $userId come from your authentication layer
+    $this->acl->assert($request->method, $request->path, $roles, $userId);
+
+    return null;
 }
 ```
 
@@ -153,11 +160,33 @@ be present; a config declaring neither fails to load.
 |---|---|---|
 | `*` | any path | `'*' => ['GET']` |
 | `/prefix/*` | the prefix itself **and** any descendant | `'/api/posts/*'` covers `/api/posts`, `/api/posts/42`, `/api/posts/42/comments`. As a degenerate case, `'/*'` is an empty prefix — it matches `/` itself and every absolute path (without being the bare `*` catch-all, which also matches paths without a leading `/`) |
+| `/a/*/b` | the segments line up one for one, `*` covering exactly one | `'/api/posts/*/comments'` covers `/api/posts/42/comments`, but neither `/api/posts/42` nor `/api/posts/42/comments/7` |
+| `/a/{name}/b` | the same, with a named single-segment placeholder | `'/posts/{post_id}/comments'` covers `/posts/8757/comments` |
 | an exact path | that path and nothing else | `'/api/posts'` does not cover `/api/posts/42` |
 
-The boundary is a segment: `/api/posts/*` does **not** cover `/api/postscript`. The single `*` is the
-whole grammar — there is no `:param` and no mid-string wildcard, because route parameters belong to the
-router and gating on a specific id belongs to `migears/acl-data`.
+The boundary is a segment on both sides of a wildcard: `/api/posts/*` does **not** cover
+`/api/postscript`, and `'/api/posts/*/comments'` does not cover `/api/posts/42/commentary`. A wildcard is
+always a whole segment — `/post*` is not a pattern. A placeholder names a position, not a value: it says
+*any* value may sit there, never *which* one — gating on a particular id belongs to `migears/acl-data`.
+
+Covering one segment has two spellings: `*` away from the end, and `{name}` anywhere. A `*` in the last
+position is instead the subtree form, and that is the one place the two part ways — `'/posts/{post_id}'` is
+a single post, `'/posts/*'` is the collection and everything under it. So an endpoint whose path carries an
+id reads like the route it guards: `'/posts/{post_id}/comments'` reaches the comments of a post, and
+`'/posts/{post_id}/comments/{comment_id}'` reaches one comment. A malformed brace is rejected at load time
+rather than loading as inert literal text.
+
+That is what keeps a nested API precise. Where every endpoint carries an id, a trailing wildcard alone
+would hand over the whole subtree — `/api/posts/*` gives a reader every post's every comment. Naming the
+position instead (`/api/posts/*/comments`) grants one endpoint: the comments of a post, and nothing below
+them. Several positions nest, and a trailing one keeps its breadth, so `/api/posts/*/comments/*` is the
+comment detail plus whatever hangs under it.
+
+When two rules match the same path, the more specific one decides which methods apply — a literal segment
+beats a `{name}` placeholder, which beats a `*`. An exact rule for one literal value
+(`'/posts/ALL/comments'`) is therefore not widened by a wildcard rule beside it (`'/posts/*/comments'`). A
+trailing `*` counts as reach rather than precision, so `'/posts'` and `'/posts/*'` stay level on `/posts`
+itself and union. Rules of equal specificity union too, which is why the order of keys never matters.
 
 The same path may appear only once per map: PHP silently collapses duplicate array keys and the later
 one wins. That is the one sharp edge here, and the loader cannot detect it, because the information is
@@ -167,8 +196,8 @@ to scan.
 ### Evaluation order
 
 1. Start from `default` (`false` when omitted).
-2. If **any** of the subject's roles has a pattern matching the path whose method list matches the
-   method, the result becomes `true` — role results union.
+2. A role grants the request when the most specific of its patterns that matches the path lists the
+   method; patterns level on specificity union. If any role grants it, the result becomes `true`.
 3. If a `userId` is given and that id is present under `users`: a matching `deny` returns `false`
    outright; otherwise a matching `grant` returns `true`.
 4. Otherwise the result so far stands.
@@ -291,8 +320,9 @@ MIT. See [LICENSE](LICENSE).
 - **配置就是端点清单。** 一条规则读作 `/api/posts => ['GET', 'POST']`，所以它长得像它所守护的那张路由表。
   加一个端点就是加一行，而不是发明一个标识符。
 - **默认拒绝。** 未命中的请求一律拒绝。对大部分开放的模块，`'default' => true` 可以翻转这一点，但出厂姿态是收紧的。
-- **顺序是写死的，不是一道优先级谜题。** 角色结果取并集，然后用户级 `deny` 直接胜出，再由用户级 `grant` 追加。
-  没有任何一条规则被另一条无声遮住。
+- **最具体的规则胜出，同具体度取并集。** 同一张规则表里只有锚定路径最多的那些模式会被采纳，因此精确规则不会被
+  旁边的宽泛规则放大，结果也完全不取决于文件里键的顺序。随后角色结果取并集，用户级 `deny` 直接胜出，再由用户级
+  `grant` 追加。
 - **加载时全有或全无。** 整份文件在实例产生之前就校验完，因此一个畸形条目载入的是零，而不是半套权限。
 - **零运行时依赖，加载之后没有 I/O。** 文件只读一次；此后 `allows()` 是配置与参数之上的纯函数。
   没有会话、没有容器、没有数据库、没有全局状态。
@@ -369,11 +399,15 @@ $acl = AclFeature::fromFile(__DIR__ . '/config/acl-feature.php');
 ```
 
 ```php
-// MiRest 基类 —— 推荐调用点：检查在请求到达资源处理器之前完成，
-// 因此拒绝时处理器的代码根本不会执行
-protected function before(string $method, string $path, array $roles, int|string|null $userId): void
+// 某个资源基类 —— 推荐调用点：检查在请求到达处理器之前完成，
+// 因此拒绝时处理器的代码根本不会执行。路径用路由器看到的请求路径，
+// 规则里凡是有 id 的位置写单段通配即可。
+protected function before(Request $request): ?Response
 {
-    $this->aclFeature->assert($method, $path, $roles, $userId);
+    // $roles 与 $userId 来自你的认证层
+    $this->acl->assert($request->method, $request->path, $roles, $userId);
+
+    return null;
 }
 ```
 
@@ -410,10 +444,29 @@ if ($acl->allows('POST', '/api/posts', $roles, $userId)) {
 |---|---|---|
 | `*` | 任何路径 | `'*' => ['GET']` |
 | `/前缀/*` | 该前缀本身**以及**任意后代路径 | `'/api/posts/*'` 覆盖 `/api/posts`、`/api/posts/42`、`/api/posts/42/comments`。作为退化形式，`'/*'` 是空前缀——它匹配 `/` 本身与每一个绝对路径（但并不是裸 `*` 的通吃，裸 `*` 还会匹配不带前导 `/` 的路径） |
+| `/a/*/b` | 各段一一对齐，其中 `*` 恰好覆盖一段 | `'/api/posts/*/comments'` 覆盖 `/api/posts/42/comments`，但不覆盖 `/api/posts/42`，也不覆盖 `/api/posts/42/comments/7` |
+| `/a/{name}/b` | 同上，只是用带名字的单段占位符 | `'/posts/{post_id}/comments'` 覆盖 `/posts/8757/comments` |
 | 精确路径 | 只匹配该路径 | `'/api/posts'` 不覆盖 `/api/posts/42` |
 
-边界落在段上：`/api/posts/*` **不**覆盖 `/api/postscript`。单个 `*` 就是全部语法——没有 `:param`，
-也没有中间的字符串通配，因为路由参数属于路由层，而按具体 id 放行属于 `migears/acl-data`。
+边界在通配符两侧都落在段上：`/api/posts/*` **不**覆盖 `/api/postscript`，`'/api/posts/*/comments'` 也
+不覆盖 `/api/posts/42/commentary`。通配符永远是完整的一段——`/post*` 不是合法写法。占位符指名的是位置，
+不是值：它表达「这个位置上可以是任意值」，而非「是哪一个值」——按具体 id 放行属于 `migears/acl-data`。
+
+覆盖一段有两种写法：不在末尾的 `*`，以及任意位置的 `{name}`。位于末尾的 `*` 则是子树形式，这也是两者唯一
+分道扬镳之处——`'/posts/{post_id}'` 是一篇文章，`'/posts/*'` 是该集合及其下所有内容。于是带 id 的端点可以
+照着它所守护的路由写：`'/posts/{post_id}/comments'` 到达某篇文章的评论，
+`'/posts/{post_id}/comments/{comment_id}'` 到达某一条评论。花括号写法不完整会在加载期被拒绝，不会被当成
+普通文本静默载入。
+
+这正是嵌套 API 得以精确的原因。当每个端点都带 id 时，只用尾部通配等于把整棵子树交出去——`/api/posts/*`
+会让读者拿到所有文章的所有评论。改为点名位置（`/api/posts/*/comments`）就只放行一个端点：某篇文章的
+评论，且不含评论之下的任何东西。多个这样的位置可以嵌套，而尾部那段仍保留其广度，所以
+`/api/posts/*/comments/*` 是评论详情，连同它下面的路径一并覆盖。
+
+当两条规则命中同一路径时，更具体的那条决定可用方法——字面段胜于 `{name}` 占位符，占位符又胜于 `*`。因此针对
+某个字面值的精确规则（`'/posts/ALL/comments'`）不会被旁边的通配规则（`'/posts/*/comments'`）放大。尾部 `*`
+算作广度而非精度，所以 `'/posts'` 与 `'/posts/*'` 在 `/posts` 本身上同级并取并集。具体度相同的规则同样取
+并集，这也是键的顺序从不起作用的原因。
 
 同一张表里同一个路径只能出现一次：PHP 会静默折叠重复的数组键，后写的胜出。这是这里唯一的坑，而加载器无法
 察觉它——PHP 解析文件时信息就已经丢了——因此请把一个角色的路径规则写在一处，便于一眼扫完。
@@ -421,7 +474,7 @@ if ($acl->allows('POST', '/api/posts', $roles, $userId)) {
 ### 求值顺序
 
 1. 从 `default` 起步（省略时为 `false`）。
-2. 主体的角色中只要有**任一**角色的某个模式命中该路径、且其方法列表命中该方法，结果就变为 `true` —— 角色结果取并集。
+2. 某个角色下，命中该路径的模式中最具体的那条决定方法是否可用；具体度相同的取并集。只要有任一角色放行，结果就变为 `true`。
 3. 若给了 `userId` 且该 id 出现在 `users` 中：命中的 `deny` 直接返回 `false`；否则命中的 `grant` 返回 `true`。
 4. 否则维持此前的结果。
 

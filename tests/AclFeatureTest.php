@@ -114,6 +114,94 @@ final class AclFeatureTest extends TestCase
         $this->assertFalse($acl->allows('GET', '/api/posts/', ['viewer']));
     }
 
+    /**
+     * A `*` that is not the last segment covers exactly one segment, so an
+     * endpoint whose path carries an id in the middle is still nameable on its
+     * own — the comments of one post, rather than the post or a comment's own
+     * children.
+     */
+    public function testAMiddleWildcardCoversExactlyOneSegment(): void
+    {
+        $acl = AclFeature::fromArray([
+            'roles' => ['viewer' => ['/api/posts/*/comments' => ['GET']]],
+        ]);
+
+        $this->assertTrue($acl->allows('GET', '/api/posts/42/comments', ['viewer']));
+        $this->assertFalse($acl->allows('GET', '/api/posts/42', ['viewer']));
+        $this->assertFalse($acl->allows('GET', '/api/posts/42/comments/7', ['viewer']));
+    }
+
+    /**
+     * Several wildcard segments can be nested. The trailing one keeps its
+     * subtree meaning, so the rule covers the head it hangs off as well as
+     * everything under that head.
+     */
+    public function testSeveralWildcardSegmentsCanBeNested(): void
+    {
+        $acl = AclFeature::fromArray([
+            'roles' => ['viewer' => ['/api/posts/*/comments/*' => ['DELETE']]],
+        ]);
+
+        $this->assertTrue($acl->allows('DELETE', '/api/posts/42/comments/7', ['viewer']));
+        // the head is the comments collection, and the prefix form includes it
+        $this->assertTrue($acl->allows('DELETE', '/api/posts/42/comments', ['viewer']));
+        $this->assertFalse($acl->allows('DELETE', '/api/posts/42', ['viewer']));
+    }
+
+    public function testAMiddleWildcardStopsAtItsOwnDepthOnly(): void
+    {
+        $acl = AclFeature::fromArray([
+            'roles' => ['viewer' => ['/api/posts/*/comments' => ['GET']]],
+        ]);
+
+        // the boundary is still a segment on either side of the wildcard
+        $this->assertFalse($acl->allows('GET', '/api/posts/comments', ['viewer']));
+        $this->assertFalse($acl->allows('GET', '/api/posts/42/commentary', ['viewer']));
+    }
+
+    public function testATrailingWildcardNeedsThePathToReachItsPrefix(): void
+    {
+        $acl = AclFeature::fromArray([
+            'roles' => ['viewer' => ['/api/posts/*' => ['GET']]],
+        ]);
+
+        // shorter than the prefix the pattern names, so there is nothing to cover
+        $this->assertFalse($acl->allows('GET', '/api', ['viewer']));
+        $this->assertFalse($acl->allows('GET', '/', ['viewer']));
+    }
+
+    /**
+     * `{name}` is a named placeholder for one segment, so a rule that mirrors the
+     * route it guards reaches the real request: '/posts/{post_id}/comments' hits
+     * '/posts/8757/comments'. It matches one value, so it adds no depth.
+     */
+    public function testAPlaceholderMatchesOneSegment(): void
+    {
+        $acl = AclFeature::fromArray([
+            'roles' => ['viewer' => ['/posts/{post_id}/comments' => ['GET']]],
+        ]);
+
+        $this->assertTrue($acl->allows('GET', '/posts/8757/comments', ['viewer']));
+        $this->assertTrue($acl->allows('GET', '/posts/ALL/comments', ['viewer']));
+        $this->assertFalse($acl->allows('GET', '/posts/8757', ['viewer']));
+        $this->assertFalse($acl->allows('GET', '/posts/8757/comments/12', ['viewer']));
+    }
+
+    /**
+     * A placeholder in the last position stays one segment, because it names a
+     * value. That is where it parts ways with a trailing wildcard, which is the
+     * subtree form: '/posts/{post_id}' is one post, '/posts/*' is the collection.
+     */
+    public function testATrailingPlaceholderIsNotASubtree(): void
+    {
+        $acl = AclFeature::fromArray([
+            'roles' => ['viewer' => ['/posts/{post_id}' => ['GET']]],
+        ]);
+
+        $this->assertTrue($acl->allows('GET', '/posts/8757', ['viewer']));
+        $this->assertFalse($acl->allows('GET', '/posts/8757/comments', ['viewer']));
+    }
+
     public function testTheMethodIsCaseInsensitive(): void
     {
         $acl = $this->acl();
@@ -124,8 +212,8 @@ final class AclFeatureTest extends TestCase
 
     public function testPatternsCoveringTheSamePathAreUnioned(): void
     {
-        // '/api/posts' and '/api/posts/*' both cover '/api/posts', and each
-        // contributes its own methods: neither entry replaces the other.
+        // A trailing '*' adds reach rather than precision, so on '/api/posts'
+        // these two are level and their methods union: neither replaces the other.
         $acl = AclFeature::fromArray([
             'roles' => [
                 'editor' => [
@@ -137,6 +225,60 @@ final class AclFeatureTest extends TestCase
 
         $this->assertTrue($acl->allows('GET', '/api/posts', ['editor']));
         $this->assertTrue($acl->allows('POST', '/api/posts', ['editor']));
+    }
+
+    /**
+     * Specificity decides which matching rule applies: a literal segment beats a
+     * placeholder, which beats the wildcard. A broad rule therefore no longer
+     * widens a precise one sitting beside it.
+     */
+    public function testTheMostSpecificMatchingPatternDecides(): void
+    {
+        // the broad rule is listed first on purpose: the precise one wins anyway,
+        // so the order of keys in the file decides nothing
+        $acl = AclFeature::fromArray([
+            'roles' => ['editor' => [
+                '/posts/*/comments' => ['GET'],
+                '/posts/ALL/comments' => ['POST'],
+            ]],
+        ]);
+
+        // on its own path the literal rule wins, so only its methods apply
+        $this->assertTrue($acl->allows('POST', '/posts/ALL/comments', ['editor']));
+        $this->assertFalse($acl->allows('GET', '/posts/ALL/comments', ['editor']));
+        // and the wildcard rule still governs every other value
+        $this->assertTrue($acl->allows('GET', '/posts/42/comments', ['editor']));
+        $this->assertFalse($acl->allows('POST', '/posts/42/comments', ['editor']));
+    }
+
+    public function testAPlaceholderBeatsTheWildcardAtTheSamePosition(): void
+    {
+        $acl = AclFeature::fromArray([
+            'roles' => ['editor' => [
+                '/a/{name}/b' => ['GET'],
+                '/a/*/b' => ['DELETE'],
+            ]],
+        ]);
+
+        $this->assertTrue($acl->allows('GET', '/a/x/b', ['editor']));
+        $this->assertFalse($acl->allows('DELETE', '/a/x/b', ['editor']));
+    }
+
+    /**
+     * Equally specific patterns union, so two rules of the same precision both
+     * count and the order of keys in the file never decides anything.
+     */
+    public function testEquallySpecificPatternsAreUnioned(): void
+    {
+        $acl = AclFeature::fromArray([
+            'roles' => ['editor' => [
+                '/a/{x}/b' => ['GET'],
+                '/a/{y}/b' => ['DELETE'],
+            ]],
+        ]);
+
+        $this->assertTrue($acl->allows('GET', '/a/z/b', ['editor']));
+        $this->assertTrue($acl->allows('DELETE', '/a/z/b', ['editor']));
     }
 
     // --- roles and users --------------------------------------------------

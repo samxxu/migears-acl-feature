@@ -30,8 +30,8 @@ namespace MiGears\AclFeature;
  *   $acl = AclFeature::fromFile(__DIR__ . '/config/acl-feature.php');
  *   $acl->assert('POST', '/api/posts', ['editor'], 42);
  *
- * The recommended call site is MiRest::before(), so the check finishes before
- * the request reaches a resource handler: a denial then short-circuits the
+ * The recommended call site is a resource's before() hook, so the check runs
+ * before the request reaches a handler: a denial then short-circuits the
  * pipeline and no handler code runs at all.
  *
  * What this is not: no database, no session, no container, no HTTP types. One
@@ -112,10 +112,14 @@ final class AclFeature
      * deny and grant are never silently collapsed into one of them:
      *
      *   1. start from `default` (false when omitted)
-     *   2. any role whose rule map matches the request grants it
+     *   2. any role whose rule map grants the request makes the result true
      *   3. a user-level deny returns false outright, else a user-level grant
      *      returns true
      *   4. otherwise the result so far stands
+     *
+     * Inside one rule map the most specific pattern that matches the path decides
+     * which methods apply, so a precise rule is never widened by a looser one
+     * sitting next to it; equally specific patterns are unioned.
      *
      * @param string|list<string> $roles
      */
@@ -363,13 +367,17 @@ final class AclFeature
     }
 
     /**
-     * A path pattern is `*`, an exact path beginning with `/`, or a prefix
-     * ending in `/*` which also matches the prefix itself.
+     * A path pattern is `*`, or a `/`-rooted path whose segments are literal,
+     * the wildcard `*`, or a `{name}` placeholder.
      *
-     * The single `*` is the whole grammar. There is no `:param` and no
-     * mid-string wildcard, because route parameters belong to the router and
-     * gating on a specific id is acl-data's job — a permission that depends on
-     * which row is being addressed is not an endpoint permission.
+     * A wildcard always occupies a whole segment. A trailing `*` is the subtree
+     * form (`/posts/*` covers the prefix and everything under it); a `*` anywhere
+     * else covers exactly one segment. A `{name}` placeholder covers exactly one
+     * segment too, and — because it names a value — it stays one segment even in
+     * the last position, so `/posts/{post_id}` is the post itself and not what
+     * hangs under it. A partial segment is never a wildcard: `/post*` is
+     * rejected, and so is a malformed brace, so a rule meant as a placeholder can
+     * never load as inert literal text.
      */
     private static function isPathPattern(string $pattern): bool
     {
@@ -381,9 +389,37 @@ final class AclFeature
             return false;
         }
 
-        $stars = substr_count($pattern, '*');
+        $body = substr($pattern, 1);
 
-        return $stars === 0 || ($stars === 1 && str_ends_with($pattern, '/*'));
+        if ($body === '') {
+            return true;
+        }
+
+        foreach (explode('/', $body) as $segment) {
+            if ($segment === '' || !self::isPathSegment($segment)) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /**
+     * A segment is a literal, the wildcard `*`, or a well-formed `{name}`. A
+     * malformed brace is an assembly mistake rather than literal text: accepting
+     * it would load a rule that can never match anything.
+     */
+    private static function isPathSegment(string $segment): bool
+    {
+        if ($segment === '*') {
+            return true;
+        }
+
+        if (!str_contains($segment, '*') && !str_contains($segment, '{') && !str_contains($segment, '}')) {
+            return true;
+        }
+
+        return preg_match('/^\{[A-Za-z_][A-Za-z0-9_]*\}$/', $segment) === 1;
     }
 
     /**
@@ -396,21 +432,49 @@ final class AclFeature
     }
 
     /**
-     * True when any pattern in the map matches the request.
+     * True when the map lets the method through for this path.
+     *
+     * Only the most specific matching patterns are consulted, so a rule written
+     * for a literal segment is not widened by a wildcard beside it. Patterns that
+     * are level on specificity union, which keeps the file's key order out of the
+     * decision.
      *
      * @param array<string, list<string>> $rules
      */
     private static function matches(array $rules, string $method, string $path): bool
     {
+        /** @var list<array{0: list<int>, 1: list<string>}> $matched */
+        $matched = [];
+
         foreach ($rules as $pattern => $methods) {
-            if (!self::matchesPath($pattern, $path)) {
+            if (self::matchesPath($pattern, $path)) {
+                $matched[] = [self::specificity($pattern), $methods];
+            }
+        }
+
+        $best = null;
+        $methodsOfBest = [];
+
+        foreach ($matched as [$rank, $methods]) {
+            if ($best === null) {
+                $best = $rank;
+                $methodsOfBest = $methods;
                 continue;
             }
 
-            foreach ($methods as $candidate) {
-                if ($candidate === '*' || $candidate === $method) {
-                    return true;
-                }
+            $order = self::compareRanks($rank, $best);
+
+            if ($order > 0) {
+                $best = $rank;
+                $methodsOfBest = $methods;
+            } elseif ($order === 0) {
+                $methodsOfBest = array_merge($methodsOfBest, $methods);
+            }
+        }
+
+        foreach ($methodsOfBest as $candidate) {
+            if ($candidate === '*' || $candidate === $method) {
+                return true;
             }
         }
 
@@ -420,7 +484,9 @@ final class AclFeature
     /**
      * `/api/posts/*` matches the prefix itself and anything under it, with the
      * boundary on a segment: `/api/posts/42` is under `/api/posts`, and
-     * `/api/postscript` is not.
+     * `/api/postscript` is not. Every other position is anchored: a `*` or a
+     * placeholder there covers one segment, and the rest of the path has to line
+     * up with the remaining segments one for one.
      */
     private static function matchesPath(string $pattern, string $path): bool
     {
@@ -428,13 +494,95 @@ final class AclFeature
             return true;
         }
 
-        if (!str_ends_with($pattern, '/*')) {
-            return $pattern === $path;
+        $patternSegments = explode('/', $pattern);
+        $pathSegments = explode('/', $path);
+
+        // Only a trailing '*' is the subtree form. A trailing placeholder is not:
+        // a placeholder names one value, so it never grows into a subtree.
+        if ($patternSegments[count($patternSegments) - 1] === '*') {
+            array_pop($patternSegments);
+
+            if (count($pathSegments) < count($patternSegments)) {
+                return false;
+            }
+
+            $pathSegments = array_slice($pathSegments, 0, count($patternSegments));
+        } elseif (count($patternSegments) !== count($pathSegments)) {
+            return false;
         }
 
-        $prefix = substr($pattern, 0, -2);
+        foreach ($patternSegments as $i => $segment) {
+            if (!self::isWildcardSegment($segment) && $segment !== $pathSegments[$i]) {
+                return false;
+            }
+        }
 
-        return $path === $prefix || str_starts_with($path, $prefix . '/');
+        return true;
+    }
+
+    /**
+     * True for the two forms that match any one value at their position: the
+     * wildcard `*` and a `{name}` placeholder.
+     */
+    private static function isWildcardSegment(string $segment): bool
+    {
+        return $segment === '*' || str_starts_with($segment, '{');
+    }
+
+    /**
+     * Rank a pattern for specificity, segment by segment: a literal is 3, a
+     * `{name}` placeholder is 2 and the wildcard is 1, so comparing the ranks
+     * left to right says which pattern anchors more of the path.
+     *
+     * A trailing `*` is dropped rather than ranked. That one is the subtree form,
+     * so it adds reach rather than precision, and dropping it leaves an exact
+     * pattern and its subtree form level with each other — which is what keeps
+     * '/api/posts' and '/api/posts/*' unioned on '/api/posts' itself.
+     *
+     * @return list<int>
+     */
+    private static function specificity(string $pattern): array
+    {
+        $segments = explode('/', $pattern);
+
+        if ($segments[count($segments) - 1] === '*') {
+            array_pop($segments);
+        }
+
+        $ranks = [];
+
+        foreach ($segments as $segment) {
+            if ($segment === '*') {
+                $ranks[] = 1;
+            } elseif (str_starts_with($segment, '{')) {
+                $ranks[] = 2;
+            } else {
+                $ranks[] = 3;
+            }
+        }
+
+        return $ranks;
+    }
+
+    /**
+     * Compare two specificity ranks. The first position they differ at decides,
+     * and the higher rank wins; when one rank list is a prefix of the other, the
+     * longer one wins, because it anchors more segments.
+     *
+     * @param list<int> $a
+     * @param list<int> $b
+     */
+    private static function compareRanks(array $a, array $b): int
+    {
+        $shared = min(count($a), count($b));
+
+        for ($i = 0; $i < $shared; $i++) {
+            if ($a[$i] !== $b[$i]) {
+                return $a[$i] <=> $b[$i];
+            }
+        }
+
+        return count($a) <=> count($b);
     }
 
     /**
