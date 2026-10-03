@@ -1,0 +1,48 @@
+{
+    "name": "migears/acl-feature",
+    "description": "Endpoint-level access control from a PHP config file — keyed by URL path and HTTP method, deny by default",
+    "type": "library",
+    "license": "MIT",
+    "version": "2.0.0",
+    "authors": [
+        {
+            "name": "Sam X. Xu",
+            "email": "samxxu@gmail.com",
+            "role": "Developer"
+        }
+    ],
+    "keywords": [
+        "acl",
+        "access-control",
+        "authorization",
+        "permissions",
+        "configuration",
+        "migears"
+    ],
+    "homepage": "https://github.com/samxxu/migears-acl-feature",
+    "support": {
+        "issues": "https://github.com/samxxu/migears-acl-feature/issues",
+        "source": "https://github.com/samxxu/migears-acl-feature"
+    },
+    "require": {
+        "php": "^8.1"
+    },
+    "require-dev": {
+        "phpunit/phpunit": "^10",
+        "phpstan/phpstan": "^2.2"
+    },
+    "autoload": {
+        "psr-4": {
+            "MiGears\\AclFeature\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "MiGears\\AclFeature\\Tests\\": "tests/"
+        }
+    },
+    "scripts": {
+        "test": "phpunit",
+        "analyse": "phpstan analyse"
+    }
+}
